@@ -16,10 +16,10 @@ Run with docker compose:
 docker compose up -d --build
 ```
 
-OR run separately (requires Java 21 and Gradle):
+OR run separately (requires Java 25 and the included Gradle wrapper):
 ```bash
 docker compose up -d db
-gradle bootRun
+./gradlew bootRun
 ```
 
 ## Update DB

@@ -26,11 +26,11 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
-    implementation("org.apache.commons:commons-csv:1.11.0")
+    implementation("org.apache.commons:commons-csv:1.14.1")
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.17")
 
-    compileOnly("org.projectlombok:lombok:1.18.46")
-    annotationProcessor("org.projectlombok:lombok:1.18.46")
+    compileOnly("org.projectlombok:lombok:1.18.48")
+    annotationProcessor("org.projectlombok:lombok:1.18.48")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
 }
