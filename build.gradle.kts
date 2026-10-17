@@ -27,7 +27,7 @@ dependencies {
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
     implementation("org.apache.commons:commons-csv:1.14.1")
-    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.17")
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.1")
 
     compileOnly("org.projectlombok:lombok:1.18.48")
     annotationProcessor("org.projectlombok:lombok:1.18.48")
