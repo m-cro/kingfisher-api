@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   test:
@@ -22,3 +23,18 @@ jobs:
         run: chmod +x ./gradlew
       - name: Run tests and build
         run: ./gradlew clean test bootJar --no-daemon
+
+  deploy:
+    if: ${{ gitea.event_name == 'push' && gitea.ref == 'refs/heads/main' }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy tested commit
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          curl --fail --silent --show-error \
+            --request POST http://127.0.0.1:5910/deploy/api \
+            --header "Authorization: token ${GITEA_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --data "{\"run_id\":\"${GITHUB_RUN_ID}\",\"sha\":\"${GITHUB_SHA}\"}"
