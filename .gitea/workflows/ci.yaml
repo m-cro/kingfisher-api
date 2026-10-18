@@ -33,7 +33,7 @@ jobs:
         env:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: |
-          curl --fail --silent --show-error \
+          curl --fail-with-body --silent --show-error \
             --request POST http://127.0.0.1:5910/deploy/api \
             --header "Authorization: token ${GITEA_TOKEN}" \
             --header 'Content-Type: application/json' \
