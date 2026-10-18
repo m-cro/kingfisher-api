@@ -38,3 +38,23 @@ jobs:
             --header "Authorization: token ${GITEA_TOKEN}" \
             --header 'Content-Type: application/json' \
             --data "{\"run_id\":\"${GITHUB_RUN_ID}\",\"sha\":\"${GITHUB_SHA}\"}"
+
+  publish-image:
+    if: ${{ gitea.event_name == 'push' && gitea.ref == 'refs/heads/main' }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+      - name: Build and publish
+        env:
+          GHCR_SHA_IMAGE: ghcr.io/m-cro/kingfisher-api:${{ github.sha }}
+          GHCR_LATEST_IMAGE: ghcr.io/m-cro/kingfisher-api:latest
+        run: |
+          docker build --tag "$GHCR_SHA_IMAGE" --tag "$GHCR_LATEST_IMAGE" .
+          docker push "$GHCR_SHA_IMAGE"
+          docker push "$GHCR_LATEST_IMAGE"
