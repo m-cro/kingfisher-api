@@ -55,6 +55,4 @@ jobs:
           GHCR_SHA_IMAGE: ghcr.io/m-cro/kingfisher-api:${{ github.sha }}
           GHCR_LATEST_IMAGE: ghcr.io/m-cro/kingfisher-api:latest
         run: |
-          docker build --tag "$GHCR_SHA_IMAGE" --tag "$GHCR_LATEST_IMAGE" .
-          docker push "$GHCR_SHA_IMAGE"
-          docker push "$GHCR_LATEST_IMAGE"
+          docker buildx build --push --tag "$GHCR_SHA_IMAGE" --tag "$GHCR_LATEST_IMAGE" .
