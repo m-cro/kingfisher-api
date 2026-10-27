@@ -43,6 +43,15 @@ Instructor SQL regression tests can be run against PostgreSQL with `pg_trgm`
 installed using `TEST_DATABASE_URL=jdbc:postgresql://localhost/test_db ./gradlew test`.
 The tests use temporary fixture tables that disappear when the connection closes.
 
+## Grade availability
+
+Schedule-only semesters remain in course grade responses so they can still be
+selected and their live sections viewed. In grade distributions, `gpa` is `null`
+when there are no letter grades, and `gpaIncludingW` is `null` when there are no
+grades including withdrawals. A real all-F result remains `0.0`.
+The web UI shows missing GPAs as N/A, labels semesters with no grades, and leaves
+gaps in GPA trends instead of plotting a zero or substituting historical grades.
+
 ## Live section schedules
 `/v1/admin/ingest-sections` pulls live section schedules (CRN, meeting times/rooms, instructors) for a given term directly from the public UIUC Course Explorer, rather than from a CSV. Runs in the background (it's a long walk of the Course Explorer's own subject/course/section catalog with a deliberate delay between requests, so it respects their rate limits) — the response comes back immediately, check server logs for progress:
 
@@ -63,7 +72,10 @@ GET /v1/courses/{id}/scheduled-sections?term=2026-fa
 ```
 
 ## Historical Course Explorer Scraper & CSV Import/Export
-For one-time bulk archival or populating past semesters (2004–present), use the scraper suite in `scripts/`:
+For one-time bulk archival or populating past semesters (2004–present), use the scraper suite in `scripts/`.
+Discovery and batch scraping prioritize the newest year and semester first,
+including explicit `--terms` lists and year ranges. Completed checkpoints still
+skip work that has already finished:
 
 ```bash
 # Discover all available terms on Course Explorer (2004-present)

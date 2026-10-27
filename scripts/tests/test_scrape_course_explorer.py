@@ -128,5 +128,34 @@ class ExportScopeTest(unittest.TestCase):
                     checkpoint.conn.close()
 
 
+class ScrapeOrderTest(unittest.TestCase):
+    def test_discovers_newest_years_first_and_sorts_seasons(self):
+        fetcher = MagicMock()
+        documents = {
+            f"{scraper.BASE_URL}.xml": '<schedule><calendarYear id="2025"/><calendarYear id="2026"/></schedule>',
+            f"{scraper.BASE_URL}/2026.xml": '<year><term href="/2026/spring.xml"/><term href="/2026/fall.xml"/><term href="/2026/summer.xml"/><term href="/2026/winter.xml"/></year>',
+            f"{scraper.BASE_URL}/2025.xml": '<year><term href="/2025/fall.xml"/></year>',
+        }
+        fetcher.fetch.side_effect = documents.__getitem__
+        terms = scraper.discover_available_terms(fetcher)
+        self.assertEqual([term[2] for term in terms], ["2026-wi", "2026-fa", "2026-su", "2026-sp", "2025-fa"])
+        self.assertEqual([call.args[0] for call in fetcher.fetch.call_args_list],
+                         [f"{scraper.BASE_URL}.xml", f"{scraper.BASE_URL}/2026.xml", f"{scraper.BASE_URL}/2025.xml"])
+
+    def test_all_ranges_and_explicit_terms_scrape_newest_first(self):
+        terms = [(2025, "fall", "2025-fa"), (2026, "spring", "2026-sp"),
+                 (2026, "summer", "2026-su"), (2026, "fall", "2026-fa")]
+        for flags in (["--all"], ["--start-year", "2025", "--end-year", "2026"],
+                      ["--terms", "2025-fa,2026-sp,2026-su,2026-fa"]):
+            with self.subTest(flags=flags), patch.object(scraper.sys, "argv", ["scraper", *flags]), \
+                    patch.object(scraper, "CheckpointManager"), \
+                    patch.object(scraper, "RateLimitedFetcher"), \
+                    patch.object(scraper, "discover_available_terms", return_value=terms), \
+                    patch.object(scraper, "scrape_term") as scrape:
+                scraper.main()
+            self.assertEqual([call.args[2] for call in scrape.call_args_list],
+                             ["2026-fa", "2026-su", "2026-sp", "2025-fa"])
+
+
 if __name__ == "__main__":
     unittest.main()

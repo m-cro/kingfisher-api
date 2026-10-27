@@ -38,6 +38,7 @@ USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Ge
 DEFAULT_DELAY = 0.75  # Seconds between requests
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 2.0
+SEASON_ORDER = {"spring": 1, "summer": 2, "fall": 3, "winter": 4}
 
 
 def create_ssl_context():
@@ -213,7 +214,7 @@ def season_to_code(season: str) -> str:
 
 
 def discover_available_terms(fetcher: RateLimitedFetcher) -> List[Tuple[int, str, str]]:
-    """Fetches schedule.xml and returns [(year, season, year_term)] sorted oldest to newest."""
+    """Fetches schedule.xml and returns [(year, season, year_term)] sorted newest to oldest."""
     root_xml = fetcher.fetch(f"{BASE_URL}.xml")
     if not root_xml:
         print("[!] Failed to fetch root schedule.xml", file=sys.stderr)
@@ -226,7 +227,7 @@ def discover_available_terms(fetcher: RateLimitedFetcher) -> List[Tuple[int, str
         if y_str.isdigit():
             years.append(int(y_str))
 
-    years.sort()
+    years.sort(reverse=True)
     discovered_terms = []
 
     for year in years:
@@ -246,7 +247,7 @@ def discover_available_terms(fetcher: RateLimitedFetcher) -> List[Tuple[int, str
         except Exception as e:
             print(f"[!] Error parsing year {year}: {e}", file=sys.stderr)
 
-    return discovered_terms
+    return sorted(discovered_terms, key=lambda term: (term[0], SEASON_ORDER.get(term[1], 0)), reverse=True)
 
 
 def parse_section_xml(xml_text: str) -> dict:
@@ -755,6 +756,9 @@ def main():
     if not target_terms and not (args.export_csv or args.export_json):
         parser.print_help()
         sys.exit(1)
+
+    # Always prioritize recent semesters, including explicit --terms lists.
+    target_terms.sort(key=lambda term: (term[0], SEASON_ORDER.get(term[1], 0)), reverse=True)
 
     # Perform scraping
     if target_terms:

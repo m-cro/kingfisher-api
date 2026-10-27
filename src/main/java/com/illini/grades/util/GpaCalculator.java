@@ -3,9 +3,10 @@ package com.illini.grades.util;
 import com.illini.grades.dto.GradeDistributionDto;
 import java.util.List;
 
+/** A GPA is undefined (null) when its denominator contains no grades. */
 public class GpaCalculator {
 
-    public static double computeGpa(int aPlus, int a, int aMinus,
+    public static Double computeGpa(int aPlus, int a, int aMinus,
                                     int bPlus, int b, int bMinus,
                                     int cPlus, int c, int cMinus,
                                     int dPlus, int d, int dMinus,
@@ -17,11 +18,11 @@ public class GpaCalculator {
                       + 0.0 * f;
         int credits = aPlus + a + aMinus + bPlus + b + bMinus
                     + cPlus + c + cMinus + dPlus + d + dMinus + f;
-        if (credits == 0) return 0.0;
+        if (credits == 0) return null;
         return points / credits;
     }
 
-    public static double computeGpaIncludingW(int aPlus, int a, int aMinus,
+    public static Double computeGpaIncludingW(int aPlus, int a, int aMinus,
                                               int bPlus, int b, int bMinus,
                                               int cPlus, int c, int cMinus,
                                               int dPlus, int d, int dMinus,
@@ -33,7 +34,7 @@ public class GpaCalculator {
                       + 0.0 * f;
         int credits = aPlus + a + aMinus + bPlus + b + bMinus
                     + cPlus + c + cMinus + dPlus + d + dMinus + f + w;
-        if (credits == 0) return 0.0;
+        if (credits == 0) return null;
         return points / credits;
     }
 
@@ -44,8 +45,8 @@ public class GpaCalculator {
                                                   int f, int w) {
         int total = aPlus + a + aMinus + bPlus + b + bMinus
                   + cPlus + c + cMinus + dPlus + d + dMinus + f + w;
-        double gpa = computeGpa(aPlus, a, aMinus, bPlus, b, bMinus, cPlus, c, cMinus, dPlus, d, dMinus, f, w);
-        double gpaIncludingW = computeGpaIncludingW(aPlus, a, aMinus, bPlus, b, bMinus, cPlus, c, cMinus, dPlus, d, dMinus, f, w);
+        Double gpa = computeGpa(aPlus, a, aMinus, bPlus, b, bMinus, cPlus, c, cMinus, dPlus, d, dMinus, f, w);
+        Double gpaIncludingW = computeGpaIncludingW(aPlus, a, aMinus, bPlus, b, bMinus, cPlus, c, cMinus, dPlus, d, dMinus, f, w);
 
         return new GradeDistributionDto(
             aPlus, a, aMinus, bPlus, b, bMinus, cPlus, c, cMinus, dPlus, d, dMinus, f, w,

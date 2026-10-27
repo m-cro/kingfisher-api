@@ -16,6 +16,6 @@ public record GradeDistributionDto(
     int f,
     int w,
     int total,
-    double gpa,
-    double gpaIncludingW
+    Double gpa,
+    Double gpaIncludingW
 ) {}
