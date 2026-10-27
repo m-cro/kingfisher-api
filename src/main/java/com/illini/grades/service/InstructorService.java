@@ -10,6 +10,7 @@ import com.illini.grades.exception.ResourceNotFoundException;
 import com.illini.grades.repository.InstructorRepository;
 import com.illini.grades.repository.SectionRepository;
 import com.illini.grades.util.GpaCalculator;
+import com.illini.grades.util.InstructorNameSearch;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -35,9 +36,9 @@ public class InstructorService {
         if (perPage > 100) perPage = 100;
         Page<Instructor> result;
         if (query != null && !query.isBlank()) {
-            result = instructorRepository.searchByQuery(query, PageRequest.of(page - 1, perPage));
+            result = instructorRepository.searchByQuery(query.strip(), InstructorNameSearch.patternFor(query), PageRequest.of(page - 1, perPage));
         } else {
-            result = instructorRepository.findAll(PageRequest.of(page - 1, perPage));
+            result = instructorRepository.findAll(PageRequest.of(page - 1, perPage, org.springframework.data.domain.Sort.by("name", "id")));
         }
 
         List<InstructorSummaryDto> dtos = result.stream()

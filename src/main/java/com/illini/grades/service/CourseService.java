@@ -14,6 +14,7 @@ import com.illini.grades.repository.ScheduledSectionRepository;
 import com.illini.grades.repository.SectionRepository;
 import com.illini.grades.repository.TermRepository;
 import com.illini.grades.util.GpaCalculator;
+import com.illini.grades.util.InstructorNameSearch;
 import jakarta.persistence.criteria.Join;
 import jakarta.persistence.criteria.JoinType;
 import org.springframework.beans.factory.annotation.Value;
@@ -162,19 +163,26 @@ public class CourseService {
             sql.append(" AND EXISTS (SELECT 1 FROM course_offerings co JOIN terms t ON co.term_id = t.id WHERE co.course_id = c.id AND LOWER(t.year_term) = :term) ");
         }
 
+        String exactInstructorName = instructorName == null ? null : instructorName.strip().toLowerCase(Locale.ROOT);
+        String instructorPattern = InstructorNameSearch.patternFor(instructorName);
         String[] instructorTokens = null;
         if (instructorName != null && !instructorName.isBlank()) {
-            instructorTokens = Arrays.stream(instructorName.toLowerCase().split("[\\s,]+"))
+            instructorTokens = Arrays.stream(exactInstructorName.split("[\\s,]+"))
                                      .filter(t -> !t.isBlank())
                                      .toArray(String[]::new);
             if (instructorTokens.length > 0) {
                 sql.append(" AND EXISTS (SELECT 1 FROM course_offerings co JOIN sections sec ON sec.course_offering_id = co.id JOIN instructors i ON i.id = sec.instructor_id WHERE co.course_id = c.id ");
-                for (int i = 0; i < instructorTokens.length; i++) {
-                    sql.append(" AND (LOWER(i.name) LIKE :inst").append(i)
-                       .append(" OR i.name % :instRaw").append(i)
-                       .append(" OR similarity(LOWER(i.name), :instRaw").append(i).append(") > 0.3) ");
+                if (!instructorPattern.isEmpty()) {
+                    sql.append(" AND ").append(InstructorNameSearch.NORMALIZED_NAME).append(" ~ :instPattern) ");
+                } else {
+                    sql.append(" AND (LOWER(BTRIM(i.name)) = :instExact OR (NOT EXISTS (SELECT 1 FROM instructors exact_i WHERE LOWER(BTRIM(exact_i.name)) = :instExact) ");
+                    for (int i = 0; i < instructorTokens.length; i++) {
+                        sql.append(" AND (LOWER(i.name) LIKE :inst").append(i)
+                           .append(" OR i.name % :instRaw").append(i)
+                           .append(" OR similarity(LOWER(i.name), :instRaw").append(i).append(") > 0.3) ");
+                    }
+                    sql.append("))) ");
                 }
-                sql.append(") ");
             }
         }
 
@@ -279,11 +287,18 @@ public class CourseService {
         }
 
         if (instructorTokens != null && instructorTokens.length > 0) {
-            for (int i = 0; i < instructorTokens.length; i++) {
-                queryObj.setParameter("inst" + i, "%" + instructorTokens[i] + "%");
-                queryObj.setParameter("instRaw" + i, instructorTokens[i]);
-                countQueryObj.setParameter("inst" + i, "%" + instructorTokens[i] + "%");
-                countQueryObj.setParameter("instRaw" + i, instructorTokens[i]);
+            if (!instructorPattern.isEmpty()) {
+                queryObj.setParameter("instPattern", instructorPattern);
+                countQueryObj.setParameter("instPattern", instructorPattern);
+            } else {
+                queryObj.setParameter("instExact", exactInstructorName);
+                countQueryObj.setParameter("instExact", exactInstructorName);
+                for (int i = 0; i < instructorTokens.length; i++) {
+                    queryObj.setParameter("inst" + i, "%" + instructorTokens[i] + "%");
+                    queryObj.setParameter("instRaw" + i, instructorTokens[i]);
+                    countQueryObj.setParameter("inst" + i, "%" + instructorTokens[i] + "%");
+                    countQueryObj.setParameter("instRaw" + i, instructorTokens[i]);
+                }
             }
         }
 
@@ -346,9 +361,14 @@ public class CourseService {
                 if (number != null) tagQuery.setParameter("number", number);
                 if (term != null && !term.isBlank() && !"all".equalsIgnoreCase(term)) tagQuery.setParameter("term", term.trim().toLowerCase());
                 if (instructorTokens != null && instructorTokens.length > 0) {
-                    for (int i = 0; i < instructorTokens.length; i++) {
-                        tagQuery.setParameter("inst" + i, "%" + instructorTokens[i] + "%");
-                        tagQuery.setParameter("instRaw" + i, instructorTokens[i]);
+                    if (!instructorPattern.isEmpty()) {
+                        tagQuery.setParameter("instPattern", instructorPattern);
+                    } else {
+                        tagQuery.setParameter("instExact", exactInstructorName);
+                        for (int i = 0; i < instructorTokens.length; i++) {
+                            tagQuery.setParameter("inst" + i, "%" + instructorTokens[i] + "%");
+                            tagQuery.setParameter("instRaw" + i, instructorTokens[i]);
+                        }
                     }
                 }
                 if (!upperSectionTypes.isEmpty()) tagQuery.setParameter("sectionTypes", upperSectionTypes);

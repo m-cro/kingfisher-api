@@ -10,6 +10,7 @@ import com.illini.grades.repository.ScheduledSectionRepository;
 import com.illini.grades.repository.SubjectRepository;
 import com.illini.grades.repository.TermRepository;
 import jakarta.persistence.EntityManager;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -29,6 +30,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -42,7 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * sections that disappeared from the schedule (cancelled/renumbered), so it
  * doubles as a refresh once seats/times change during registration.
  *
- * Sequential with a fixed delay between requests and aborts on a streak of 403s
+ * Sequential with a minimum delay plus random jitter between requests and aborts on a streak of 403s
  * (WAF block) rather than burning through the remaining queue -- re-running the
  * admin endpoint later picks up wherever it left off, since already-ingested
  * sections are just re-upserted.
@@ -51,10 +53,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class SectionScheduleIngestionService {
 
     private static final String BASE = "https://courses.illinois.edu/cisapp/explorer/schedule";
-    private static final String USER_AGENT = "kingfisher-section-ingest/1.0 (educational course-grade viewer; contact rthakkar4@wisc.edu)";
+    private static final String DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
     private static final Duration REQUEST_DELAY = Duration.ofMillis(750);
     private static final int ABORT_ON_403_STREAK = 5;
     private static final List<String> VALID_SEASONS = List.of("spring", "summer", "fall", "winter");
+
+    @Value("${COURSE_EXPLORER_USER_AGENT:" + DEFAULT_USER_AGENT + "}")
+    private String userAgent = DEFAULT_USER_AGENT;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -270,7 +276,7 @@ public class SectionScheduleIngestionService {
 
     private void sleepBetweenRequests() {
         try {
-            Thread.sleep(REQUEST_DELAY.toMillis());
+            Thread.sleep(REQUEST_DELAY.toMillis() + ThreadLocalRandom.current().nextLong(501));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -289,7 +295,9 @@ public class SectionScheduleIngestionService {
     private FetchResult fetch(String url) {
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                    .header("User-Agent", USER_AGENT)
+                    .header("User-Agent", userAgent)
+                    .header("Accept", "application/xml, text/xml;q=0.9, */*;q=0.8")
+                    .header("Accept-Language", "en-US,en;q=0.9")
                     .timeout(Duration.ofSeconds(15))
                     .GET()
                     .build();

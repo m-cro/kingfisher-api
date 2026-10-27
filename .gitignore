@@ -6,3 +6,5 @@ kingfisher-web
 data/
 *.db
 *.import.sql
+__pycache__/
+*.pyc

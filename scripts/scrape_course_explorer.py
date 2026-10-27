@@ -10,13 +10,15 @@ Features:
 - Robust checkpointing with SQLite (safe to interrupt and resume anytime).
 - Multi-format Export: CSV (flat tabular) and JSON (structured hierarchy).
 - CSV Import: Fast bulk import from CSV directly into PostgreSQL without re-scraping.
-- Rate-limiting, exponential backoff, and WAF 403 cooldown handling.
+- Configurable request identity, timing jitter, and server-aware retry backoff.
 """
 
 import argparse
 import csv
 import json
+import math
 import os
+import random
 import re
 import sqlite3
 import ssl
@@ -27,25 +29,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 BASE_URL = "https://courses.illinois.edu/cisapp/explorer/schedule"
-USER_AGENT = "kingfisher-historical-scraper/1.0 (educational UIUC course explorer archiver; contact rthakkar4@wisc.edu)"
-DEFAULT_DELAY = 0.35  # Seconds between requests
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+DEFAULT_DELAY = 0.75  # Seconds between requests
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 2.0
 
 
 def create_ssl_context():
-    """Creates a resilient SSL context for macOS and Linux."""
-    try:
-        ctx = ssl.create_default_context()
-        return ctx
-    except Exception:
-        pass
-    ctx = ssl._create_unverified_context()
-    return ctx
+    """Use the platform trust store; never disable certificate verification."""
+    return ssl.create_default_context()
 
 
 def parse_xml_clean(xml_text: str) -> ET.Element:
@@ -55,63 +52,70 @@ def parse_xml_clean(xml_text: str) -> ET.Element:
     return ET.fromstring(clean)
 
 
-class RateLimitedFetcher:
-    """HTTP Client with rate limiting, retries, and WAF 403 cool-off."""
+class FetchError(RuntimeError):
+    """A failed request must not be checkpointed as a completed course/term."""
 
-    def __init__(self, delay: float = DEFAULT_DELAY):
+
+class RateLimitedFetcher:
+    """Sequential requests with bounded retries and additive timing jitter."""
+
+    def __init__(self, delay: float = DEFAULT_DELAY, jitter: float = 0.5,
+                 user_agent: Optional[str] = None):
+        if any(not math.isfinite(v) or v < 0 for v in (delay, jitter)):
+            raise ValueError("delay and jitter must be finite and non-negative")
+        self.user_agent = user_agent if user_agent is not None else os.getenv("COURSE_EXPLORER_USER_AGENT", USER_AGENT)
+        if not self.user_agent.strip() or any(c in self.user_agent for c in "\r\n"):
+            raise ValueError("user agent must be a non-empty single line")
         self.delay = delay
-        self.last_request_time = 0.0
+        self.jitter = jitter
+        self.last_request_time = None
         self.ssl_ctx = create_ssl_context()
 
-    def fetch(self, url: str) -> Optional[str]:
-        elapsed = time.time() - self.last_request_time
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
-
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "application/xml, text/xml, */*",
-            },
-        )
-
-        for attempt in range(1, MAX_RETRIES + 1):
+    @staticmethod
+    def retry_after(value: Optional[str]) -> float:
+        if not value:
+            return 0.0
+        try:
+            return max(0.0, float(int(value)))
+        except ValueError:
             try:
-                self.last_request_time = time.time()
-                try:
-                    with urllib.request.urlopen(req, timeout=20, context=self.ssl_ctx) as resp:
-                        if resp.status == 200:
-                            return resp.read().decode("utf-8", errors="replace")
-                        return None
-                except (ssl.SSLError, urllib.error.URLError) as ssl_err:
-                    if "CERTIFICATE_VERIFY_FAILED" in str(ssl_err):
-                        unverified_ctx = ssl._create_unverified_context()
-                        with urllib.request.urlopen(req, timeout=20, context=unverified_ctx) as resp:
-                            if resp.status == 200:
-                                return resp.read().decode("utf-8", errors="replace")
-                            return None
-                    raise ssl_err
+                when = parsedate_to_datetime(value)
+                return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                return 0.0
 
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
+    def fetch(self, url: str) -> Optional[str]:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": self.user_agent,
+            "Accept": "application/xml, text/xml;q=0.9, */*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        for attempt in range(1, MAX_RETRIES + 1):
+            if self.last_request_time is not None:
+                interval = self.delay + random.uniform(0, self.jitter)
+                time.sleep(max(0.0, interval - (time.monotonic() - self.last_request_time)))
+            self.last_request_time = time.monotonic()
+            try:
+                with urllib.request.urlopen(req, timeout=20, context=self.ssl_ctx) as resp:
+                    return resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                exc.close()
+                if exc.code == 404:
                     return None
-                elif e.code == 403:
-                    wait_time = 12 * attempt
-                    print(f"\n[!] WAF rate limit (HTTP 403) on {url}. Cooling down for {wait_time}s...", file=sys.stderr)
-                    time.sleep(wait_time)
-                elif e.code in (429, 500, 502, 503, 504):
-                    wait_time = BACKOFF_FACTOR ** attempt
-                    time.sleep(wait_time)
-                else:
-                    if attempt == MAX_RETRIES:
-                        print(f"\n[!] HTTP {e.code} for {url}", file=sys.stderr)
-                    return None
-            except Exception as e:
-                wait_time = BACKOFF_FACTOR ** attempt
-                time.sleep(wait_time)
-
-        return None
+                if exc.code not in (403, 429, 500, 502, 503, 504):
+                    raise FetchError(f"HTTP {exc.code} for {url}") from exc
+                if attempt == MAX_RETRIES:
+                    raise FetchError(f"HTTP {exc.code} for {url} after {attempt} attempts") from exc
+                backoff = 12 * attempt if exc.code == 403 else BACKOFF_FACTOR ** attempt
+                wait = max(backoff, self.retry_after(exc.headers.get("Retry-After")))
+                wait += random.uniform(0, self.jitter)
+                print(f"[!] HTTP {exc.code}; retrying in {wait:.1f}s: {url}", file=sys.stderr)
+                time.sleep(wait)
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt == MAX_RETRIES:
+                    raise FetchError(f"Request failed for {url} after {attempt} attempts: {exc}") from exc
+                time.sleep(BACKOFF_FACTOR ** attempt + random.uniform(0, self.jitter))
+        raise FetchError(f"Request failed for {url}")
 
 
 class CheckpointManager:
@@ -336,6 +340,7 @@ def scrape_term(
     print(f"[*] Found {len(subject_codes)} subjects in {year_term}.")
 
     total_sections_scraped = 0
+    term_complete = True
 
     for s_idx, subj in enumerate(subject_codes, 1):
         subj_xml = fetcher.fetch(f"{BASE_URL}/{year}/{season}/{subj}.xml")
@@ -362,6 +367,7 @@ def scrape_term(
             c_root = parse_xml_clean(course_xml)
             section_els = c_root.findall(".//section")
 
+            course_complete = True
             for sec_el in section_els:
                 crn = sec_el.get("id")
                 if not crn:
@@ -390,15 +396,20 @@ def scrape_term(
                         on_section_scraped(record)
 
                 except Exception as ex:
+                    course_complete = False
+                    term_complete = False
                     print(f"\n[!] Error parsing {subj} {course_num} CRN {crn}: {ex}", file=sys.stderr)
 
-            checkpoint.mark_course_completed(year_term, subj, course_num)
+            if course_complete:
+                checkpoint.mark_course_completed(year_term, subj, course_num)
 
         sys.stdout.write(f"\r  -> Progress: {s_idx}/{len(subject_codes)} subjects processed ({subj}) | {total_sections_scraped} sections saved")
         sys.stdout.flush()
 
-    checkpoint.mark_term_completed(year_term)
-    print(f"\n[✓] Completed term {year_term}. Total new sections: {total_sections_scraped}")
+    if term_complete:
+        checkpoint.mark_term_completed(year_term)
+    status = "Completed" if term_complete else "Incomplete (parsing failures; rerun to retry)"
+    print(f"\n[*] {status} term {year_term}. Total new sections: {total_sections_scraped}")
     return total_sections_scraped
 
 
@@ -512,7 +523,8 @@ def export_sections_to_json(sections: List[dict], output_json_path: str):
 def import_csv_to_postgres(csv_path: str, db_url: str):
     """
     Imports exported sections CSV directly into Kingfisher PostgreSQL database tables:
-    terms, subjects, courses, course_offerings, scheduled_sections, scheduled_section_meetings, instructors.
+    terms, subjects, courses, course_offerings, scheduled_sections,
+    scheduled_section_meetings, instructors, scheduled_section_meeting_instructors.
     """
     if not os.path.exists(csv_path):
         print(f"[!] CSV file not found: {csv_path}", file=sys.stderr)
@@ -544,10 +556,12 @@ def import_csv_to_postgres(csv_path: str, db_url: str):
                     "meetings": [],
                 }
 
-            if row["type_code"] or row["building_name"] or row["start_time"] or row["instructors"]:
+            meeting_fields = ("start_time", "end_time", "days_of_week", "room_number",
+                              "building_name", "type_code", "type_description", "instructors")
+            if any(row.get(field, "").strip() for field in meeting_fields):
                 instructors = [i.strip() for i in row["instructors"].split(";") if i.strip()]
                 sections_by_crn[key]["meetings"].append({
-                    "meeting_index": int(row.get("meeting_index", len(sections_by_crn[key]["meetings"]))),
+                    "meeting_index": int(row.get("meeting_index") or len(sections_by_crn[key]["meetings"])),
                     "start_time": row["start_time"] or None,
                     "end_time": row["end_time"] or None,
                     "days_of_week": row["days_of_week"] or None,
@@ -563,7 +577,7 @@ def import_csv_to_postgres(csv_path: str, db_url: str):
     sql_file = csv_path + ".import.sql"
     generate_import_sql(sections_by_crn.values(), sql_file)
     print(f"[*] Executing SQL batch import via Docker psql...")
-    cmd = ["docker", "exec", "-i", "kingfisher-api-db-1", "psql", "-U", "postgres", "-d", "illini_grades"]
+    cmd = ["docker", "exec", "-i", "kingfisher-api-db-1", "psql", "--set=ON_ERROR_STOP=1", "-U", "postgres", "-d", "illini_grades"]
     try:
         with open(sql_file, "r", encoding="utf-8") as sf:
             res = subprocess.run(cmd, stdin=sf, capture_output=True, text=True)
@@ -578,32 +592,73 @@ def import_csv_to_postgres(csv_path: str, db_url: str):
         return False
 
 
-def generate_import_sql(sections, sql_output_path: str):
-    """Generates an idempotent SQL script to insert sections into postgres."""
-    with open(sql_output_path, "w", encoding="utf-8") as f:
-        f.write("BEGIN;\n\n")
-        for s in sections:
-            notes_esc = ("'" + s["notes"].replace("'", "''") + "'") if s.get("notes") else "NULL"
-            title_esc = "'" + (s["course_title"] or "").replace("'", "''") + "'"
-            s_date = f"'{s['start_date']}'" if s.get("start_date") else "NULL"
-            e_date = f"'{s['end_date']}'" if s.get("end_date") else "NULL"
+def sql_literal(value) -> str:
+    """Quote PostgreSQL text/date values with standard_conforming_strings enabled."""
+    return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
 
+
+def generate_import_sql(sections, sql_output_path: str):
+    """Upsert sections and replace their meeting snapshots in one transaction.
+
+    Meeting deletion cascades to instructor links, but shared instructor records
+    and sections not present in the import are retained, as in the live writer.
+    """
+    with open(sql_output_path, "w", encoding="utf-8") as f:
+        f.write("BEGIN;\nSET LOCAL standard_conforming_strings = on;\n\n")
+        for s in sections:
+            year = int(s["year"])
+            number = int(s["course_number"])
+            season = sql_literal(s["season"])
+            term = sql_literal(s["year_term"])
+            subject = sql_literal(s["subject"])
+            title = sql_literal(s.get("course_title") or "")
+            crn = sql_literal(s["crn"])
+            section_number = sql_literal(s.get("section_number") or None)
+            status = sql_literal(s.get("status_code") or None)
+            part = sql_literal(s.get("part_of_term") or None)
+            start = sql_literal(s.get("start_date") or None)
+            end = sql_literal(s.get("end_date") or None)
+            notes = sql_literal(s.get("notes") or None)
+            # Title distinguishes special-topics courses sharing a subject/number.
+            course_id = f"(SELECT c.id FROM courses c JOIN subjects sub ON sub.id = c.subject_id WHERE sub.code = {subject} AND c.number = {number} AND c.title = {title})"
+            offering_id = f"(SELECT co.id FROM course_offerings co JOIN terms t ON t.id = co.term_id WHERE co.course_id = {course_id} AND t.year_term = {term})"
+            section_id = f"(SELECT ss.id FROM scheduled_sections ss WHERE ss.course_offering_id = {offering_id} AND ss.crn = {crn})"
             f.write(f"""
-INSERT INTO terms (year, season, year_term) VALUES ({s['year']}, '{s['season']}', '{s['year_term']}') ON CONFLICT (year_term) DO NOTHING;
-INSERT INTO subjects (code) VALUES ('{s['subject']}') ON CONFLICT (code) DO NOTHING;
-INSERT INTO courses (subject_id, number, title) VALUES ((SELECT id FROM subjects WHERE code = '{s['subject']}'), {s['course_number']}, {title_esc}) ON CONFLICT DO NOTHING;
-INSERT INTO course_offerings (course_id, term_id) VALUES (
-    (SELECT c.id FROM courses c JOIN subjects s ON c.subject_id = s.id WHERE s.code = '{s['subject']}' AND c.number = {s['course_number']} LIMIT 1),
-    (SELECT id FROM terms WHERE year_term = '{s['year_term']}')
-) ON CONFLICT (course_id, term_id) DO NOTHING;
+INSERT INTO terms (year, season, year_term) VALUES ({year}, {season}, {term}) ON CONFLICT (year_term) DO NOTHING;
+INSERT INTO subjects (code) VALUES ({subject}) ON CONFLICT (code) DO NOTHING;
+INSERT INTO courses (subject_id, number, title) VALUES ((SELECT id FROM subjects WHERE code = {subject}), {number}, {title}) ON CONFLICT DO NOTHING;
+INSERT INTO course_offerings (course_id, term_id) VALUES ({course_id}, (SELECT id FROM terms WHERE year_term = {term})) ON CONFLICT (course_id, term_id) DO NOTHING;
 
 INSERT INTO scheduled_sections (course_offering_id, crn, section_number, status_code, part_of_term, start_date, end_date, notes)
-VALUES (
-    (SELECT co.id FROM course_offerings co JOIN courses c ON co.course_id = c.id JOIN subjects s ON c.subject_id = s.id JOIN terms t ON co.term_id = t.id WHERE s.code = '{s['subject']}' AND c.number = {s['course_number']} AND t.year_term = '{s['year_term']}' LIMIT 1),
-    '{s['crn']}', '{s['section_number'] or ''}', '{s['status_code'] or ''}', '{s['part_of_term'] or ''}', {s_date}, {e_date}, {notes_esc}
-) ON CONFLICT (course_offering_id, crn) DO UPDATE SET
+VALUES ({offering_id}, {crn}, {section_number}, {status}, {part}, {start}, {end}, {notes})
+ON CONFLICT (course_offering_id, crn) DO UPDATE SET
     section_number = EXCLUDED.section_number, status_code = EXCLUDED.status_code, part_of_term = EXCLUDED.part_of_term,
     start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, notes = EXCLUDED.notes;
+DELETE FROM scheduled_section_meetings WHERE scheduled_section_id = {section_id};
+""")
+            seen_indices = set()
+            for position, meeting in enumerate(s.get("meetings") or []):
+                index = int(meeting.get("meeting_index", position))
+                if not 0 <= index <= 32767 or index in seen_indices:
+                    raise ValueError(f"Invalid or duplicate meeting_index {index} for {s['year_term']} CRN {s['crn']}")
+                seen_indices.add(index)
+                fields = ("start_time", "end_time", "days_of_week", "room_number",
+                          "building_name", "type_code", "type_description")
+                values = ", ".join(sql_literal(meeting.get(field) or None) for field in fields)
+                f.write(f"""
+INSERT INTO scheduled_section_meetings (scheduled_section_id, meeting_index, {', '.join(fields)})
+VALUES ({section_id}, {index}, {values});
+""")
+                # A co-taught meeting can repeat a name in source data; link it once.
+                names = dict.fromkeys(name.strip() for name in meeting.get("instructors", []) if name and name.strip())
+                for name in names:
+                    instructor = sql_literal(name)
+                    f.write(f"""
+INSERT INTO instructors (name) VALUES ({instructor}) ON CONFLICT (name) DO NOTHING;
+INSERT INTO scheduled_section_meeting_instructors (meeting_id, instructor_id)
+SELECT m.id, i.id FROM scheduled_section_meetings m CROSS JOIN instructors i
+WHERE m.scheduled_section_id = {section_id} AND m.meeting_index = {index} AND i.name = {instructor}
+ON CONFLICT (meeting_id, instructor_id) DO NOTHING;
 """)
         f.write("\nCOMMIT;\n")
 
@@ -639,6 +694,8 @@ def main():
 
     config_group = parser.add_argument_group("Configuration")
     config_group.add_argument("--delay", type=float, default=DEFAULT_DELAY, help=f"Delay between requests in seconds (default: {DEFAULT_DELAY}).")
+    config_group.add_argument("--jitter", type=float, default=0.5, help="Maximum extra random delay in seconds (default: 0.5).")
+    config_group.add_argument("--user-agent", default=os.getenv("COURSE_EXPLORER_USER_AGENT", USER_AGENT), help="HTTP User-Agent (or COURSE_EXPLORER_USER_AGENT).")
     config_group.add_argument("--checkpoint-db", type=str, default=default_checkpoint_db, help="Path to SQLite checkpoint database.")
     config_group.add_argument("--output-dir", type=str, default=default_data_dir, help="Directory for term export files.")
 
@@ -649,7 +706,10 @@ def main():
         success = import_csv_to_postgres(args.import_csv, args.db_url)
         sys.exit(0 if success else 1)
 
-    fetcher = RateLimitedFetcher(delay=args.delay)
+    try:
+        fetcher = RateLimitedFetcher(delay=args.delay, jitter=args.jitter, user_agent=args.user_agent)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Mode 2: Discover terms
     if args.discover_terms:
@@ -705,7 +765,15 @@ def main():
     # Perform Exports if requested
     if args.export_csv or args.export_json:
         print("\n[*] Loading scraped sections from checkpoint database...")
-        all_sections = checkpoint.get_all_scraped_sections()
+        has_term_selection = bool(args.term or args.terms or args.all
+                                  or args.start_year is not None or args.end_year is not None)
+        if has_term_selection:
+            # An explicitly selected but empty range must export no rows, not history.
+            selected_terms = sorted({yt for _, _, yt in target_terms})
+            all_sections = [section for yt in selected_terms
+                            for section in checkpoint.get_all_scraped_sections(yt)]
+        else:
+            all_sections = checkpoint.get_all_scraped_sections()
         print(f"[*] Loaded {len(all_sections)} total sections.")
 
         if args.export_csv:
