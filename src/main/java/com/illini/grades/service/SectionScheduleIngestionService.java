@@ -1,6 +1,7 @@
 package com.illini.grades.service;
 
 import com.illini.grades.entity.Course;
+import com.illini.grades.entity.CourseGenEdCategory;
 import com.illini.grades.entity.CourseOffering;
 import com.illini.grades.entity.Subject;
 import com.illini.grades.entity.Term;
@@ -72,6 +73,7 @@ public class SectionScheduleIngestionService {
     private final CourseOfferingRepository courseOfferingRepository;
     private final ScheduledSectionRepository scheduledSectionRepository;
     private final ScheduledSectionWriter writer;
+    private final CourseGenEdWriter genEdWriter;
     private final EntityManager entityManager;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -79,13 +81,14 @@ public class SectionScheduleIngestionService {
     public SectionScheduleIngestionService(TermRepository termRepository, SubjectRepository subjectRepository,
                                             CourseRepository courseRepository, CourseOfferingRepository courseOfferingRepository,
                                             ScheduledSectionRepository scheduledSectionRepository, ScheduledSectionWriter writer,
-                                            EntityManager entityManager) {
+                                            CourseGenEdWriter genEdWriter, EntityManager entityManager) {
         this.termRepository = termRepository;
         this.subjectRepository = subjectRepository;
         this.courseRepository = courseRepository;
         this.courseOfferingRepository = courseOfferingRepository;
         this.scheduledSectionRepository = scheduledSectionRepository;
         this.writer = writer;
+        this.genEdWriter = genEdWriter;
         this.entityManager = entityManager;
     }
 
@@ -199,9 +202,11 @@ public class SectionScheduleIngestionService {
                 consecutive403 = 0;
 
                 List<String> crns;
+                List<CourseGenEdCategory> genEd;
                 try {
                     Element courseRoot = parse(courseRes.body()).getDocumentElement();
                     crns = attrValues(child(courseRoot, "sections"), "section", "id");
+                    genEd = parseGenEd(courseRoot);
                 } catch (Exception e) {
                     continue;
                 }
@@ -215,6 +220,11 @@ public class SectionScheduleIngestionService {
                     c.setNumber(number);
                     c.setTitle(label);
                     course = courseRepository.save(c);
+                }
+
+                // Overwrites with this term's categories: ingest terms oldest-to-newest so the latest wins.
+                for (Course c : existingCourses.isEmpty() ? List.of(course) : existingCourses) {
+                    genEdWriter.replace(c.getId(), copyGenEd(genEd));
                 }
 
                 final Course finalCourse = course;
@@ -520,6 +530,118 @@ public class SectionScheduleIngestionService {
         courseOfferingRepository.save(courseOffering);
         lastRefreshTimes.put(key, now);
         return new CourseRefreshStatus(true, "Successfully refreshed " + upserted + " sections from UIUC Course Explorer", 900, now, upserted);
+    }
+
+    private static final String CATALOG_BASE = "https://courses.illinois.edu/cisapp/explorer/catalog";
+    private final AtomicBoolean genEdRunning = new AtomicBoolean(false);
+
+    /**
+     * Backfills gen ed categories for every course already in the DB from the catalog endpoint
+     * (which, unlike the subject listing, carries them per course). One request per course, so
+     * this is slow by design. No-ops (returns false) if a backfill is already running.
+     */
+    public boolean startGenEdBackfill() {
+        if (!genEdRunning.compareAndSet(false, true)) {
+            return false;
+        }
+        Thread.ofVirtual().name("gen-ed-backfill").start(() -> {
+            try {
+                backfillGenEd();
+            } catch (Exception e) {
+                System.err.println("Gen ed backfill failed: " + e);
+                e.printStackTrace();
+            } finally {
+                genEdRunning.set(false);
+            }
+        });
+        return true;
+    }
+
+    private void backfillGenEd() {
+        Term latest = termRepository.findAllByOrderByYearAscSeasonAsc().stream().reduce((first, second) -> second).orElse(null);
+        if (latest == null) {
+            System.err.println("Gen ed backfill: no terms available. Aborting.");
+            return;
+        }
+        String termPath = latest.getYear() + "/" + latest.getSeason().toLowerCase();
+
+        @SuppressWarnings("unchecked")
+        List<Object[]> courses = entityManager.createQuery(
+                "SELECT c.id, c.subject.code, c.number FROM Course c ORDER BY c.id").getResultList();
+        System.out.println("Starting gen ed backfill for " + courses.size() + " courses via catalog " + termPath + "...");
+
+        int consecutive403 = 0, done = 0, withGenEd = 0, missing = 0;
+        for (Object[] row : courses) {
+            Long courseId = (Long) row[0];
+            String subjectCode = (String) row[1];
+            Short number = (Short) row[2];
+
+            sleepBetweenRequests();
+            FetchResult res = fetch(CATALOG_BASE + "/" + termPath + "/" + subjectCode + "/" + number + ".xml");
+            if (res.status() == 403) {
+                if (++consecutive403 >= ABORT_ON_403_STREAK) {
+                    System.err.println("Gen ed backfill aborted after repeated 403s (WAF block) -- safe to re-trigger later.");
+                    return;
+                }
+                continue;
+            }
+            consecutive403 = 0;
+            if (res.status() != 200) { missing++; continue; } // not in the current catalog; leave existing rows alone
+
+            try {
+                List<CourseGenEdCategory> genEd = parseGenEd(parse(res.body()).getDocumentElement());
+                genEdWriter.replace(courseId, genEd);
+                if (!genEd.isEmpty()) withGenEd++;
+            } catch (Exception e) {
+                System.err.println("Gen ed backfill: skipping " + subjectCode + " " + number + ": " + e.getMessage());
+            }
+            if (++done % 200 == 0) {
+                System.out.println("  ... gen ed backfill " + done + "/" + courses.size() + " (" + withGenEd + " with gen ed)");
+            }
+        }
+        System.out.println("Finished gen ed backfill. " + done + " courses checked, " + withGenEd + " with gen ed, "
+                + missing + " not in the " + termPath + " catalog.");
+    }
+
+    /** gen ed categories declared on a course XML root; one entry per (category, attribute) */
+    static List<CourseGenEdCategory> parseGenEd(Element courseRoot) {
+        List<CourseGenEdCategory> result = new ArrayList<>();
+        for (Element category : children(child(courseRoot, "genEdCategories"), "category")) {
+            String categoryId = category.getAttribute("id");
+            if (categoryId == null || categoryId.isBlank()) continue;
+            String categoryName = text(category, "description");
+            // The attributes wrapper is namespaced (ns2:genEdAttributes) and the parser is not namespace-aware.
+            Element attrs = child(category, "ns2:genEdAttributes");
+            List<Element> attrEls = children(attrs, "genEdAttribute");
+            if (attrEls.isEmpty()) {
+                result.add(genEdRow(categoryId, categoryName, "", null));
+                continue;
+            }
+            for (Element a : attrEls) {
+                String code = a.getAttribute("code");
+                String name = a.getTextContent() != null ? a.getTextContent().trim() : null;
+                result.add(genEdRow(categoryId, categoryName, code == null ? "" : code, name));
+            }
+        }
+        return result;
+    }
+
+    private static CourseGenEdCategory genEdRow(String categoryId, String categoryName, String code, String attrName) {
+        CourseGenEdCategory row = new CourseGenEdCategory();
+        row.setCategoryId(categoryId);
+        row.setCategoryName(categoryName);
+        row.setAttributeCode(code);
+        row.setAttributeName(attrName);
+        return row;
+    }
+
+    /** a fresh set of rows per course, since the writer assigns course ids onto them */
+    private static List<CourseGenEdCategory> copyGenEd(List<CourseGenEdCategory> rows) {
+        List<CourseGenEdCategory> copy = new ArrayList<>();
+        for (CourseGenEdCategory r : rows) {
+            copy.add(genEdRow(r.getCategoryId(), r.getCategoryName(), r.getAttributeCode(), r.getAttributeName()));
+        }
+        return copy;
     }
 
     private ParsedSection parseSection(Element sectionRoot) {

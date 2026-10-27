@@ -33,6 +33,15 @@ public class IngestionController {
         }
     }
 
+    @PostMapping("/ingest-gen-ed")
+    @Operation(summary = "Backfill gen ed categories for all existing courses from the UIUC Course Explorer catalog")
+    public Map<String, Object> backfillGenEd() {
+        if (!sectionScheduleIngestionService.startGenEdBackfill()) {
+            return Map.of("error", "A gen ed backfill is already running. Check server logs for progress.");
+        }
+        return Map.of("message", "Gen ed backfill started. This makes one request per course and runs in the background -- check server logs for progress.");
+    }
+
     @PostMapping("/ingest-sections")
     @Operation(summary = "Ingest/refresh live section schedules for a term from the UIUC Course Explorer")
     public Map<String, Object> ingestSections(@RequestParam int year, @RequestParam String season) {

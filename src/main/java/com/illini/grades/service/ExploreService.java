@@ -3,6 +3,7 @@ package com.illini.grades.service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.illini.grades.dto.*;
+import com.illini.grades.entity.CourseGenEdCategory;
 import com.illini.grades.entity.CourseGrade;
 import com.illini.grades.entity.InstructorGrade;
 import com.illini.grades.entity.Section;
@@ -48,7 +49,7 @@ public class ExploreService {
         return Sort.by(direction, sortBy);
     }
 
-    public PagedResponse<ExploreCourseDto> exploreCourses(String subjectCode, Long instructorId, Integer minStudents, Double minAvgStudents, int page, int perPage, String sort, String order) {
+    public PagedResponse<ExploreCourseDto> exploreCourses(String subjectCode, String genEd, Long instructorId, Integer minStudents, Double minAvgStudents, int page, int perPage, String sort, String order) {
         if (perPage > 100) perPage = 100;
         PageRequest pageReq = PageRequest.of(page - 1, perPage, getSort(sort, order));
 
@@ -60,6 +61,12 @@ public class ExploreService {
                 var sq = q.subquery(Long.class);
                 var cRoot = sq.from(com.illini.grades.entity.Course.class);
                 sq.select(cRoot.get("id")).where(cb.equal(cRoot.get("subject").get("code"), subjectCode));
+                predicates.add(root.get("courseId").in(sq));
+            }
+            if (genEd != null && !genEd.isBlank()) {
+                var sq = q.subquery(Long.class);
+                var gRoot = sq.from(CourseGenEdCategory.class);
+                sq.select(gRoot.get("courseId")).where(cb.equal(gRoot.get("categoryId"), genEd.trim().toUpperCase()));
                 predicates.add(root.get("courseId").in(sq));
             }
             if (instructorId != null) {

@@ -22,6 +22,7 @@ public class ExploreController {
     @GetMapping("/courses")
     public PagedResponse<ExploreCourseDto> exploreCourses(
             @RequestParam(required = false) String subject,
+            @RequestParam(required = false) String genEd,
             @RequestParam(required = false) Long instructor,
             @RequestParam(required = false) Integer minStudents,
             @RequestParam(required = false) Double minAvgStudents,
@@ -29,7 +30,7 @@ public class ExploreController {
             @RequestParam(defaultValue = "25") int perPage,
             @RequestParam(defaultValue = "avgStudents") String sort,
             @RequestParam(defaultValue = "desc") String order) {
-        return exploreService.exploreCourses(subject, instructor, minStudents, minAvgStudents, page, perPage, sort, order);
+        return exploreService.exploreCourses(subject, genEd, instructor, minStudents, minAvgStudents, page, perPage, sort, order);
     }
 
     @GetMapping("/subjects")
